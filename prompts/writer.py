@@ -53,6 +53,35 @@ Write the polished body text for this section now.
 )
 
 # ---------------------------------------------------------------------------
+# Student guide prompt
+# ---------------------------------------------------------------------------
+# Called once per section when audience == "Student".
+# Returns: StudentGuidance (structured output)
+# ---------------------------------------------------------------------------
+
+STUDENT_GUIDE_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            (
+                "You are a research mentor helping an undergraduate student. "
+                "Given a section title and summary, produce practical guidance "
+                "to help the student research this section further independently."
+            ),
+        ),
+        (
+            "human",
+            (
+                "Section title: {section_title}\n\n"
+                "Section summary:\n{section_summary}\n\n"
+                "Produce a StudentGuidance object with specific search terms, "
+                "recommended source types, and related subtopics to explore."
+            ),
+        ),
+    ]
+)
+
+# ---------------------------------------------------------------------------
 # Report assembler prompt
 # ---------------------------------------------------------------------------
 # Called once after all sections are written.

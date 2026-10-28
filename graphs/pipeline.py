@@ -26,6 +26,12 @@ Graph topology
   [cite]          CitationAgent    → FinalReport (+ citations)
       │
       ▼
+  [contradict]    ContradictionAgent → FinalReport (+ contradiction_report)
+      │
+      ▼
+  [diversity]     rule-based       → FinalReport (+ source_diversity)
+      │
+      ▼
     END
 
 Each node reads from GraphState, calls its agent, and writes its
@@ -39,10 +45,12 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 
 from agents.citation import CitationAgent
+from agents.contradiction import ContradictionAgent
 from agents.fact_checker import FactCheckerAgent
 from agents.planner import PlannerAgent
 from agents.researcher import ResearcherAgent
 from agents.writer import WriterAgent
+from schemas.report import SourceDiversityReport
 from schemas.state import GraphState
 from utils.logger import logger
 
@@ -116,6 +124,69 @@ def cite_node(state: GraphState) -> dict:
         return {"error": str(exc)}
 
 
+def contradict_node(state: GraphState) -> dict:
+    """
+    Run ContradictionAgent → enrich state["report"] with contradiction_report.
+
+    The report is already complete at this point, so a failure here is
+    logged and skipped rather than discarding the finished report.
+    """
+    logger.info("Graph: entering [contradict] node.")
+    try:
+        result = ContradictionAgent().run(
+            report=state["report"],
+            document=state["document"],
+        )
+        return {"report": result.data}
+    except Exception:
+        logger.exception("Graph: [contradict] node failed; skipping.")
+        return {}
+
+
+def _classify_source(url: str) -> str:
+    """Rule-based source-type classifier (no LLM)."""
+    u = url.lower()
+    if any(k in u for k in ["arxiv", "ieee", "acm.org", "pubmed", "sciencedirect",
+                            "springer", "researchgate", "semanticscholar", "nature.com", "jstor"]):
+        return "academic"
+    if any(k in u for k in ["bbc.", "reuters", "techcrunch", "wired.", "nytimes", "cnn.",
+                            "theguardian", "forbes", "bloomberg", "venturebeat"]):
+        return "news"
+    if any(k in u for k in [".gov", ".edu", "wikipedia.org", "who.int", "un.org"]):
+        return "government"
+    if any(k in u for k in ["medium.com", "dev.to", "towardsdatascience", "substack", "/blog"]):
+        return "industry"
+    return "other"
+
+
+def diversity_node(state: GraphState) -> dict:
+    """Classify all sources by domain type → state["report"].source_diversity."""
+    logger.info("Graph: entering [diversity] node.")
+    try:
+        counts = {"academic": 0, "news": 0, "industry": 0, "government": 0, "other": 0}
+        seen: set[str] = set()
+        for section in state["document"].sections:
+            for source in section.sources:
+                url = str(source.url)
+                if url in seen:
+                    continue
+                seen.add(url)
+                counts[_classify_source(url)] += 1
+
+        types_present = sum(1 for n in counts.values() if n > 0)
+        diversity = SourceDiversityReport(
+            **counts,
+            diversity_score="High" if types_present >= 3 else "Medium" if types_present == 2 else "Low",
+            dominant_type=max(counts, key=counts.get),
+            total_sources=len(seen),
+        )
+        report = state["report"].model_copy(update={"source_diversity": diversity})
+        return {"report": report}
+    except Exception:
+        logger.exception("Graph: [diversity] node failed; skipping.")
+        return {}
+
+
 # ---------------------------------------------------------------------------
 # Conditional edge
 # ---------------------------------------------------------------------------
@@ -145,6 +216,8 @@ def build_pipeline() -> StateGraph:
     graph.add_node("write", write_node)
     graph.add_node("fact_check", fact_check_node)
     graph.add_node("cite", cite_node)
+    graph.add_node("contradict", contradict_node)
+    graph.add_node("diversity", diversity_node)
 
     graph.add_edge(START, "plan")
 
@@ -153,6 +226,8 @@ def build_pipeline() -> StateGraph:
         ("research",   "write"),
         ("write",      "fact_check"),
         ("fact_check", "cite"),
+        ("cite",       "contradict"),
+        ("contradict", "diversity"),
     ]:
         graph.add_conditional_edges(
             current,
@@ -160,7 +235,7 @@ def build_pipeline() -> StateGraph:
             {"continue": next_node, "end": END},
         )
 
-    graph.add_edge("cite", END)
+    graph.add_edge("diversity", END)
 
     return graph.compile()
 

@@ -6,9 +6,7 @@ from typing import Any
 
 from config.llm import (
     GEMINI_MODEL,
-    GROQ_MODEL,
     get_structured_gemini_llm,
-    get_structured_llm,
     get_structured_summariser_llm,
 )
 from schemas.result import AgentResult
@@ -19,16 +17,10 @@ class BaseAgent(ABC):
     """
     Abstract base class shared by every agent.
 
-    Provider routing
-    ----------------
-    - ``execute()``              → Gemini (default for most agents)
-    - ``_run_chain()``           → Groq llama-3.3-70b (WriterAgent only)
-    - ``_run_gemini_chain()``    → Gemini gemini-2.0-flash
-    - ``_run_summariser_chain()``→ Gemini (alias for ResearcherAgent)
-
-    WriterAgent overrides ``execute()`` and calls ``_run_chain()``
-    explicitly to use Groq for prose quality.  All other agents use
-    the default ``execute()`` which routes to Gemini.
+    Every LLM call goes to Gemini (model set in ``config/llm.py``):
+    - ``execute()``              → default structured call for an agent
+    - ``_run_gemini_chain()``    → explicit structured call with a given prompt
+    - ``_run_summariser_chain()``→ alias used by ResearcherAgent
     """
 
     prompt = None
@@ -38,12 +30,39 @@ class BaseAgent(ABC):
         self.name = name
         self.logger = logger
 
+    _TRANSIENT_MARKERS = (
+        "503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "overloaded",
+        "500 INTERNAL", "internal error", "502", "504", "bad gateway",
+        "timed out", "timeout", "deadline",
+    )
+    _RETRY_WAITS = (15, 30, 60, 90)  # seconds before retries 2..5
+
+    def _invoke_with_retry(self, chain: Any, inputs: Any) -> Any:
+        """
+        Invoke a chain, retrying the SAME model on transient Gemini errors
+        (overload, rate limit, timeout) with increasing waits.  Other errors
+        are raised immediately.
+        """
+        attempts = len(self._RETRY_WAITS) + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                return chain.invoke(inputs)
+            except Exception as exc:
+                transient = any(m.lower() in str(exc).lower() for m in self._TRANSIENT_MARKERS)
+                if not transient or attempt == attempts:
+                    raise
+                wait = self._RETRY_WAITS[attempt - 1]
+                self.logger.warning(
+                    f"{self.name}: transient LLM error (attempt {attempt}/{attempts}); "
+                    f"retrying in {wait}s."
+                )
+                time.sleep(wait)
+
     def execute(self, **kwargs: Any) -> AgentResult:
         """
         Run the agent's prompt through GEMINI and return an AgentResult.
 
         Default for PlannerAgent, FactCheckerAgent, CitationAgent.
-        WriterAgent overrides this to use Groq instead.
         """
         if self.prompt is None:
             raise ValueError(f"{self.name}: prompt is not set.")
@@ -56,7 +75,7 @@ class BaseAgent(ABC):
         try:
             llm = get_structured_gemini_llm(self.output_schema)
             chain = self.prompt | llm
-            response = chain.invoke(kwargs)
+            response = self._invoke_with_retry(chain, kwargs)
             elapsed = time.perf_counter() - start
 
             self.logger.info(f"{self.name}: Finished in {elapsed:.2f}s.")
@@ -72,21 +91,6 @@ class BaseAgent(ABC):
             self.logger.exception(f"{self.name}: Execution failed.")
             raise
 
-    def _run_chain(
-        self,
-        schema: type,
-        prompt: Any,
-        inputs: dict[str, Any],
-    ) -> Any:
-        """
-        Execute a prompt through GROQ (llama-3.3-70b).
-        Used exclusively by WriterAgent for highest prose quality.
-        """
-        self.logger.debug(f"{self.name}: _run_chain [Groq] → {schema.__name__}")
-        llm = get_structured_llm(schema)
-        chain = prompt | llm
-        return chain.invoke(inputs)
-
     def _run_gemini_chain(
         self,
         schema: type,
@@ -94,13 +98,13 @@ class BaseAgent(ABC):
         inputs: dict[str, Any],
     ) -> Any:
         """
-        Execute a prompt through GEMINI (gemini-2.0-flash).
+        Execute a prompt through Gemini.
         Used by ResearcherAgent and any agent needing explicit Gemini routing.
         """
         self.logger.debug(f"{self.name}: _run_gemini_chain [Gemini] → {schema.__name__}")
         llm = get_structured_gemini_llm(schema)
         chain = prompt | llm
-        return chain.invoke(inputs)
+        return self._invoke_with_retry(chain, inputs)
 
     def _run_summariser_chain(
         self,
@@ -115,4 +119,4 @@ class BaseAgent(ABC):
         self.logger.debug(f"{self.name}: _run_summariser_chain [Gemini] → {schema.__name__}")
         llm = get_structured_summariser_llm(schema)
         chain = prompt | llm
-        return chain.invoke(inputs)
+        return self._invoke_with_retry(chain, inputs)

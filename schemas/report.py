@@ -1,5 +1,7 @@
 from pydantic import BaseModel, Field
 
+from schemas.research import StudentGuidance
+
 
 class CitedClaim(BaseModel):
     """
@@ -59,6 +61,49 @@ class FactCheckReport(BaseModel):
     )
 
 
+class SectionConfidence(BaseModel):
+    """Share of fact-checked claims in one section that are SUPPORTED."""
+
+    section_title: str
+    supported: int
+    total: int
+    confidence_pct: float  # supported / total * 100, or 100.0 if total == 0
+    confidence_label: str  # "High" (>=70%), "Medium" (>=40%), "Low" (<40%)
+
+
+class Contradiction(BaseModel):
+    """A factual contradiction between claims in two different sections."""
+
+    section_a: str
+    claim_a: str
+    section_b: str
+    claim_b: str
+    explanation: str
+
+
+class ContradictionReport(BaseModel):
+    """Cross-section consistency check produced by the ContradictionAgent."""
+
+    contradictions: list[Contradiction]
+    consistency_score: str = Field(
+        default="High",
+        description='"High" (0 contradictions), "Medium" (1-2), "Low" (3+).',
+    )
+
+
+class SourceDiversityReport(BaseModel):
+    """Rule-based classification of sources by domain type."""
+
+    academic: int = 0
+    news: int = 0
+    industry: int = 0
+    government: int = 0
+    other: int = 0
+    diversity_score: str = "Low"  # "High" (3+ types), "Medium" (2), "Low" (1)
+    dominant_type: str = "other"
+    total_sources: int = 0
+
+
 class FinalReport(BaseModel):
     """
     Complete output produced by the full InsightForge pipeline.
@@ -90,4 +135,24 @@ class FinalReport(BaseModel):
     citations: list[CitedClaim] | None = Field(
         default=None,
         description="Citation map; None until CitationAgent runs.",
+    )
+
+    student_guidance: dict[str, StudentGuidance] | None = Field(
+        default=None,
+        description="Map of section_title -> StudentGuidance. Only set when audience is Student.",
+    )
+
+    section_confidences: dict[str, SectionConfidence] | None = Field(
+        default=None,
+        description="Map of section_title -> SectionConfidence; set by FactCheckerAgent.",
+    )
+
+    contradiction_report: ContradictionReport | None = Field(
+        default=None,
+        description="Cross-section consistency check; None until ContradictionAgent runs.",
+    )
+
+    source_diversity: SourceDiversityReport | None = Field(
+        default=None,
+        description="Source domain-type breakdown; None until diversity step runs.",
     )

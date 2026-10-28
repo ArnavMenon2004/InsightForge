@@ -38,10 +38,7 @@ class ResearcherAgent(BaseAgent):
     5. Ask gemma2-9b-it to summarise the enriched content into prose.
     6. Assemble a ResearchSection from the summary and sources.
 
-    Uses gemma2-9b-it (via _run_summariser_chain) for all high-volume
-    per-section calls.  This model has a higher TPM limit than llama-3.3-70b
-    and uses fewer tokens per output word, giving richer summaries within
-    the free-tier budget.
+    Uses _run_summariser_chain for all high-volume per-section calls.
 
     Args:
         search_tool: Optional WebSearchTool. Defaults to a new instance.

@@ -88,6 +88,22 @@ class ResearchDocument(BaseModel):
     sections: list[ResearchSection]
 
 
+class StudentGuidance(BaseModel):
+    """Guidance block for student audience, one per section."""
+
+    search_terms: list[str] = Field(
+        description="2-4 specific search terms the student can use to find more on this section."
+    )
+
+    source_types: list[str] = Field(
+        description="Types of sources most useful (e.g. arXiv, IEEE Xplore, textbooks)."
+    )
+
+    related_subtopics: list[str] = Field(
+        description="2-3 related subtopics worth exploring after reading this section."
+    )
+
+
 class SectionSummary(BaseModel):
     """
     Structured LLM output for a single section's prose summary.

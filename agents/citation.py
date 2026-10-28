@@ -21,7 +21,7 @@ class CitationAgent(BaseAgent):
     Maps factual claims in the report to their supporting sources.
 
     Source list is capped at FC_MAX_SOURCES (titles + URLs only, no
-    snippets) to keep the prompt within Groq's per-request token limit.
+    snippets) to keep the prompt small.
     """
 
     prompt = CITATION_PROMPT

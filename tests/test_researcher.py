@@ -61,7 +61,7 @@ class TestResearcherAgent:
         with (
             patch.object(
                 agent,
-                "_run_chain",
+                "_run_summariser_chain",
                 side_effect=_mock_run_chain,
             )
         ):
@@ -79,7 +79,7 @@ class TestResearcherAgent:
 
         agent = ResearcherAgent(search_tool=mock_tool)
 
-        with patch.object(agent, "_run_chain", side_effect=_mock_run_chain):
+        with patch.object(agent, "_run_summariser_chain", side_effect=_mock_run_chain):
             plan = _make_plan()
             result = agent.run(plan)
 
@@ -93,7 +93,7 @@ class TestResearcherAgent:
 
         agent = ResearcherAgent(search_tool=mock_tool)
 
-        with patch.object(agent, "_run_chain", side_effect=_mock_run_chain):
+        with patch.object(agent, "_run_summariser_chain", side_effect=_mock_run_chain):
             result = agent.run(_make_plan())
 
         for section in result.data.sections:
@@ -113,7 +113,7 @@ class TestResearcherAgent:
         # summarisation chain call).
         with patch.object(
             agent,
-            "_run_chain",
+            "_run_summariser_chain",
             return_value=SearchQueries(queries=["quantum basics"]),
         ):
             result = agent.run(_make_plan())
@@ -139,7 +139,7 @@ class TestResearcherAgent:
             result = _mock_run_chain(schema, prompt, inputs)
             return result
 
-        with patch.object(agent, "_run_chain", side_effect=capturing_run_chain):
+        with patch.object(agent, "_run_summariser_chain", side_effect=capturing_run_chain):
             result = agent.run(_make_plan())
 
         for section in result.data.sections:

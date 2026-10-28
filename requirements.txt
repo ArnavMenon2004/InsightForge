@@ -5,7 +5,6 @@ streamlit>=1.35.0
 langchain>=0.2.0
 langgraph>=0.1.0
 langchain-core>=0.2.0
-langchain-groq>=0.1.0
 langchain-google-genai>=1.0.0
 
 # Search
@@ -23,3 +22,7 @@ python-dotenv>=1.0.0
 
 # PDF export
 reportlab>=4.0.0
+
+# Paper to PPT
+python-pptx>=0.6.21
+pypdf>=4.0.0

@@ -4,12 +4,43 @@ Redesigned UI: research intelligence platform aesthetic.
 All pipeline logic, schemas, and backend calls are unchanged.
 """
 
-import streamlit as st
+import html
 
+import streamlit as st
+from pypdf import PdfReader
+
+from agents.base_agent import BaseAgent
+from config.settings import PPT_PAPER_CHAR_LIMIT
 from graphs.pipeline import pipeline
+from prompts.ppt import PPT_OUTLINE_PROMPT, SlideOutline
 from schemas.state import GraphState
 from tools.export import PDFExporter
+from tools.pdf_extractor import extract_paper, fit_to_limit
+from tools.ppt_checker import unverified_numbers
+from tools.ppt_generator import PPTGenerator
 from utils.logger import logger
+
+
+def friendly_error(error, prefix: str) -> str:
+    """Turn a raw exception/error string into a short, user-readable message."""
+    text = str(error)
+    low = text.lower()
+    if "500 internal" in low or "internal error" in low:
+        why = ("Google's AI service hit a temporary internal error. "
+               "Please try again in a minute or two.")
+    elif "503" in text or "unavailable" in low or "high demand" in low:
+        why = ("The AI model is temporarily overloaded on Google's side. "
+               "This usually clears within a few minutes — please try again shortly.")
+    elif "429" in text or "resource_exhausted" in low or "quota" in low or "rate limit" in low:
+        why = "The API rate limit or daily quota was reached. Wait a bit, or check your API usage, then try again."
+    elif "timed out" in low or "timeout" in low or "deadline" in low:
+        why = "The AI model took too long to respond. Please try again."
+    elif "api key" in low or "api_key" in low or "permission_denied" in low or "401" in text or "403" in text:
+        why = "There is a problem with an API key. Check GEMINI_API_KEY and TAVILY_API_KEY in your .env file."
+    else:
+        why = "Something unexpected went wrong. Details are in the terminal log."
+    logger.error(f"{prefix} {text}")
+    return f"{prefix} {why}"
 
 # ---------------------------------------------------------------------------
 # Page configuration
@@ -278,282 +309,473 @@ with st.sidebar:
         st.markdown(f'<span class="sys-tag">{tag}</span>', unsafe_allow_html=True)
 
     st.markdown('<hr class="sidebar-rule">', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-version">v0.4.0</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-version">v0.5.0</div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
-# Page header
+# Tabs
 # ---------------------------------------------------------------------------
 
-st.markdown(
-    """
-    <div class="if-header">
-        <span class="if-header-mark">◈</span>
-        <div class="if-wordmark" style="font-size:1.4rem;letter-spacing:0.22em;">INSIGHTFORGE</div>
-        <div class="if-tagline" style="color:#50506a;margin-bottom:0.6rem;">AI RESEARCH WORKSPACE</div>
-        <div class="if-descriptor">
-            Multi-agent research &nbsp;·&nbsp; Evidence synthesis &nbsp;·&nbsp; Source verification
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+tab1, tab2 = st.tabs(["Research", "Paper to PPT"])
 
-# ---------------------------------------------------------------------------
-# Input workspace
-# ---------------------------------------------------------------------------
+# Paper to PPT is filled first so a st.stop() in the Research tab cannot skip it.
+with tab2:
+    st.markdown('<div class="workspace-label">Paper to PPT</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="workspace-instruction">Upload a research paper and generate a full conference presentation (10-12 slides).</div>',
+        unsafe_allow_html=True,
+    )
 
-st.markdown('<div class="workspace-label">New Research</div>', unsafe_allow_html=True)
-st.markdown('<div class="workspace-instruction">What would you like to investigate?</div>', unsafe_allow_html=True)
+    paper_file = st.file_uploader("Research paper (PDF)", type=["pdf"])
+    ppt_mode = "Full Conference PPT"
+    ppt_theme = st.radio("Theme", ["Dark", "Light (better for printing)"], horizontal=True)
+    ppt_button = st.button("Generate Slides →")
 
-query = st.text_input("query", placeholder="e.g. The future of quantum computing in drug discovery", label_visibility="collapsed")
-
-col_audience, col_depth, col_empty = st.columns([1, 1, 1.5])
-with col_audience:
-    audience = st.selectbox("AUDIENCE", options=["Auto","Beginner","Student","Developer","Executive"], index=0)
-with col_depth:
-    depth = st.selectbox("DEPTH", options=["Auto","Basic","Intermediate","Advanced"], index=0)
-
-audience_override = None if audience == "Auto" else audience
-depth_override    = None if depth == "Auto" else depth
-
-st.markdown("<div style='margin-top:1rem;'>", unsafe_allow_html=True)
-run_button = st.button("Begin Research →")
-st.markdown("</div>", unsafe_allow_html=True)
-
-# ---------------------------------------------------------------------------
-# Pipeline status
-# ---------------------------------------------------------------------------
-
-status_placeholder = st.empty()
-
-def render_pipeline_status(done: set, active: str | None = None) -> str:
-    stage_map = [
-        ("plan",       "Planning"),
-        ("document",   "Web Research"),
-        ("draft",      "Synthesis"),
-        ("fact_check", "Fact Verification"),
-        ("report",     "Citation"),
-    ]
-    stage_html = ""
-    for key, label in stage_map:
-        if key in done:
-            css, dot = "done", "✓"
-        elif key == active:
-            css, dot = "active", "●"
+    if ppt_button:
+        if paper_file is None:
+            st.error("Please upload a PDF first.")
         else:
-            css, dot = "", "○"
-        stage_html += f'<div class="ps-stage {css}"><span class="ps-dot">{dot}</span> {label}</div>'
+            st.session_state.pop("ppt", None)
+            try:
+                with st.spinner("Reading paper and generating slides..."):
+                    paper_text, paper_title = extract_paper(PdfReader(paper_file))
+                    if not paper_text:
+                        raise ValueError("No extractable text found in this PDF (it may be scanned).")
 
-    label_color = "#6060a0" if active else "#4a8a4a"
-    title       = "Research in Progress" if active else "Research Complete"
+                    outline = BaseAgent("PPT Agent")._run_gemini_chain(
+                        schema=SlideOutline,
+                        prompt=PPT_OUTLINE_PROMPT,
+                        inputs={
+                            "paper_text": fit_to_limit(paper_text, PPT_PAPER_CHAR_LIMIT),
+                            "mode": ppt_mode,
+                            "paper_title": paper_title or "Unknown",
+                        },
+                    )
+                    st.session_state["ppt"] = {
+                        "outline": outline,
+                        "bytes": PPTGenerator(
+                            theme="light" if ppt_theme.startswith("Light") else "dark"
+                        ).generate(outline),
+                        "flags": unverified_numbers(outline, paper_text),
+                    }
+            except Exception as exc:
+                logger.exception("PPT generation failed.")
+                st.error(friendly_error(exc, "Slide generation failed."))
 
-    return f"""
-    <div class="pipeline-status">
-        <div class="ps-label" style="color:{label_color};">{title}</div>
-        <div class="ps-stages">{stage_html}</div>
-    </div>"""
-
-# ---------------------------------------------------------------------------
-# Pipeline execution
-# ---------------------------------------------------------------------------
-
-if run_button:
-
-    if not query.strip():
-        st.error("Please enter a research topic.")
-        st.stop()
-
-    logger.info(f"Pipeline started: '{query}' audience={audience_override} depth={depth_override}")
-
-    status_placeholder.markdown(render_pipeline_status(set(), active="plan"), unsafe_allow_html=True)
-
-    try:
-        initial_state: GraphState = {"query": query, "audience": audience_override, "depth": depth_override}
-        final_state: GraphState   = initial_state.copy()
-        done_keys: set            = set()
-
-        for chunk in pipeline.stream(initial_state, stream_mode="values"):
-            final_state = chunk
-            done_keys   = {k for k in ("plan","document","draft","fact_check","report") if chunk.get(k) is not None}
-            all_stages  = ["plan","document","draft","fact_check","report"]
-            active      = next((s for s in all_stages if s not in done_keys), None)
-            status_placeholder.markdown(render_pipeline_status(done_keys, active), unsafe_allow_html=True)
-            logger.info(f"Pipeline: done={done_keys} active={active}")
-
-    except Exception as exc:
-        logger.exception("Pipeline invocation failed.")
-        st.error(f"Pipeline failed: {exc}")
-        st.stop()
-
-    if final_state.get("error"):
-        st.error(f"Pipeline error: {final_state['error']}")
-        st.stop()
-
-    if not final_state.get("report"):
-        st.error("Pipeline completed but no report was produced.")
-        st.stop()
-
-    report   = final_state["report"]
-    document = final_state["document"]
-    plan     = final_state["plan"]
-    logger.info("Pipeline completed successfully.")
-
-    sources_total = sum(len(s.sources) for s in document.sections)
-
-    status_placeholder.markdown(
-        render_pipeline_status({"plan","document","draft","fact_check","report"}),
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        f"""<div class="complete-strip">
-            <span class="cs-label">Research Complete</span>
-            <span class="cs-meta">{sources_total} sources &nbsp;·&nbsp; {len(document.sections)} sections &nbsp;·&nbsp; {plan.depth or "—"} depth</span>
-        </div>""",
-        unsafe_allow_html=True,
-    )
-
-    st.markdown('<hr class="if-rule">', unsafe_allow_html=True)
-
-    # ── Report header ──────────────────────────────────────────────────────
-
-    confidence_val = report.fact_check.overall_confidence if report.fact_check else "—"
-
-    st.markdown('<div class="report-eyebrow">Research Report</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="report-title">{report.title}</div>', unsafe_allow_html=True)
-    st.markdown(
-        f"""<div class="report-meta-strip">
-            <div class="rms-item"><span class="rms-label">Audience</span><span class="rms-value">{plan.audience or "—"}</span></div>
-            <div class="rms-item"><span class="rms-label">Depth</span><span class="rms-value">{plan.depth or "—"}</span></div>
-            <div class="rms-item"><span class="rms-label">Sections</span><span class="rms-value">{len(document.sections)}</span></div>
-            <div class="rms-item"><span class="rms-label">Sources</span><span class="rms-value">{sources_total}</span></div>
-            <div class="rms-item"><span class="rms-label">Confidence</span><span class="rms-value">{confidence_val}</span></div>
-        </div>""",
-        unsafe_allow_html=True,
-    )
-
-    # ── PDF download only ──────────────────────────────────────────────────
-
-    st.markdown('<div class="export-label">Export Report</div>', unsafe_allow_html=True)
-    st.markdown('<div class="export-sub">Download the completed research report.</div>', unsafe_allow_html=True)
-
-    try:
-        pdf_exporter = PDFExporter()
-        pdf_bytes    = pdf_exporter.export(report, document)
+    # Rendered from session_state so the deck survives the rerun a download click causes.
+    ppt_result = st.session_state.get("ppt")
+    if ppt_result:
+        outline, flags = ppt_result["outline"], ppt_result["flags"]
+        st.markdown('<hr class="if-rule">', unsafe_allow_html=True)
         st.download_button(
-            label="Download PDF",
-            data=pdf_bytes,
-            file_name=f"insightforge_{plan.topic[:40].replace(' ', '_')}.pdf",
-            mime="application/pdf",
+            label="Download PPTX",
+            data=ppt_result["bytes"],
+            file_name="insightforge_slides.pptx",
+            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
         )
-    except ImportError:
-        st.caption("PDF export requires reportlab — run: pip install reportlab")
-
-    st.markdown('<hr class="if-rule">', unsafe_allow_html=True)
-
-    # ── Executive summary ──────────────────────────────────────────────────
-
-    st.markdown(
-        f"""<div class="exec-summary-block">
-            <div class="if-eyebrow">Executive Summary</div>
-            <div class="exec-summary-body">{report.executive_summary}</div>
-        </div>""",
-        unsafe_allow_html=True,
-    )
-
-    # ── Report sections ────────────────────────────────────────────────────
-
-    import re
-
-    for idx, raw in enumerate(re.split(r'\n---\n', report.markdown), start=1):
-        raw = raw.strip()
-        if not raw:
-            continue
-        m = re.match(r'^##\s+(.+)', raw)
-        section_title = m.group(1).strip() if m else f"Section {idx}"
-        body          = raw[m.end():].strip() if m else raw
-        paragraphs    = [p.strip() for p in body.split("\n\n") if p.strip()]
-        body_html     = "".join(f"<p>{p}</p>" for p in paragraphs)
+        if flags:
+            st.caption(
+                "⚠ Some numbers could not be found in the paper text (they may be values the model "
+                "calculated). Check the marked slides before presenting."
+            )
 
         st.markdown(
-            f"""<div class="section-block">
-                <div class="section-header">
-                    <span class="section-num">{idx:02d}</span>
-                    <span class="section-title">{section_title}</span>
-                </div>
-                <div class="section-body">{body_html}</div>
-            </div>""",
+            f'<div class="report-title" style="font-size:1.4rem;">{html.escape(outline.presentation_title)}</div>',
             unsafe_allow_html=True,
         )
-
-    st.markdown('<hr class="if-rule">', unsafe_allow_html=True)
-
-    # ── Evidence review ────────────────────────────────────────────────────
-
-    if report.fact_check:
-        st.markdown('<div class="if-eyebrow">Evidence Review</div>', unsafe_allow_html=True)
-
-        conf     = report.fact_check.overall_confidence
-        conf_css = {"High":"confidence-high","Medium":"confidence-medium","Low":"confidence-low"}.get(conf,"confidence-medium")
-        results  = report.fact_check.results
-        n_sup    = sum(1 for r in results if r.verdict == "SUPPORTED")
-        n_unv    = sum(1 for r in results if r.verdict == "UNVERIFIABLE")
-        n_uns    = sum(1 for r in results if r.verdict == "UNSUPPORTED")
-
-        st.markdown(
-            f"""<div class="evidence-header">
-                <span class="confidence-badge {conf_css}">{conf} Confidence</span>
-                <span class="verdict-tally">
-                    <span class="tally-supported">{n_sup} Supported</span> &nbsp;·&nbsp;
-                    <span class="tally-unverifiable">{n_unv} Unverifiable</span> &nbsp;·&nbsp;
-                    <span class="tally-unsupported">{n_uns} Unsupported</span>
-                </span>
-            </div>""",
-            unsafe_allow_html=True,
-        )
-
-        vdict = {"SUPPORTED":"vl-supported","UNVERIFIABLE":"vl-unverifiable","UNSUPPORTED":"vl-unsupported"}
-        for fc in results:
+        for idx, slide in enumerate(outline.slides):
+            bullets_html = "".join(f"<p>• {html.escape(b)}</p>" for b in slide.bullets)
+            warn_html = (
+                f'<p style="color:#d9a441;font-size:0.8rem;">⚠ Not found in paper: '
+                f'{html.escape(", ".join(flags[idx]))}</p>'
+                if idx in flags
+                else ""
+            )
             st.markdown(
                 f"""<div class="claim-card">
                     <div class="claim-verdict-row">
-                        <span class="verdict-label {vdict.get(fc.verdict,'vl-unverifiable')}">{fc.verdict}</span>
+                        <span class="section-num">{idx + 1:02d}</span>
+                        <span class="section-title">{html.escape(slide.title)}</span>
                     </div>
-                    <div class="claim-text">{fc.claim}</div>
-                    <div class="claim-explanation">{fc.explanation}</div>
+                    <div class="claim-text">{bullets_html}{warn_html}</div>
                 </div>""",
+                unsafe_allow_html=True,
+            )
+
+with tab1:
+    # ---------------------------------------------------------------------------
+    # Page header
+    # ---------------------------------------------------------------------------
+
+    st.markdown(
+        """
+        <div class="if-header">
+            <span class="if-header-mark">◈</span>
+            <div class="if-wordmark" style="font-size:1.4rem;letter-spacing:0.22em;">INSIGHTFORGE</div>
+            <div class="if-tagline" style="color:#50506a;margin-bottom:0.6rem;">AI RESEARCH WORKSPACE</div>
+            <div class="if-descriptor">
+                Multi-agent research &nbsp;·&nbsp; Evidence synthesis &nbsp;·&nbsp; Source verification
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # ---------------------------------------------------------------------------
+    # Input workspace
+    # ---------------------------------------------------------------------------
+
+    st.markdown('<div class="workspace-label">New Research</div>', unsafe_allow_html=True)
+    st.markdown('<div class="workspace-instruction">What would you like to investigate?</div>', unsafe_allow_html=True)
+
+    query = st.text_input("query", placeholder="e.g. The future of quantum computing in drug discovery", label_visibility="collapsed")
+
+    col_audience, col_depth, col_empty = st.columns([1, 1, 1.5])
+    with col_audience:
+        audience = st.selectbox("AUDIENCE", options=["Auto","Beginner","Student","Developer","Executive"], index=0)
+    with col_depth:
+        depth = st.selectbox("DEPTH", options=["Auto","Basic","Intermediate","Advanced"], index=0)
+
+    audience_override = None if audience == "Auto" else audience
+    depth_override    = None if depth == "Auto" else depth
+
+    st.markdown("<div style='margin-top:1rem;'>", unsafe_allow_html=True)
+    run_button = st.button("Begin Research →")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # ---------------------------------------------------------------------------
+    # Pipeline status
+    # ---------------------------------------------------------------------------
+
+    status_placeholder = st.empty()
+
+    def render_pipeline_status(done: set, active: str | None = None) -> str:
+        stage_map = [
+            ("plan",       "Planning"),
+            ("document",   "Web Research"),
+            ("draft",      "Synthesis"),
+            ("fact_check", "Fact Verification"),
+            ("report",     "Citation"),
+        ]
+        stage_html = ""
+        for key, label in stage_map:
+            if key in done:
+                css, dot = "done", "✓"
+            elif key == active:
+                css, dot = "active", "●"
+            else:
+                css, dot = "", "○"
+            stage_html += f'<div class="ps-stage {css}"><span class="ps-dot">{dot}</span> {label}</div>'
+
+        label_color = "#6060a0" if active else "#4a8a4a"
+        title       = "Research in Progress" if active else "Research Complete"
+
+        return f"""
+        <div class="pipeline-status">
+            <div class="ps-label" style="color:{label_color};">{title}</div>
+            <div class="ps-stages">{stage_html}</div>
+        </div>"""
+
+    # ---------------------------------------------------------------------------
+    # Pipeline execution
+    # ---------------------------------------------------------------------------
+
+    if run_button:
+
+        if not query.strip():
+            st.error("Please enter a research topic.")
+            st.stop()
+
+        st.session_state.pop("result", None)
+        logger.info(f"Pipeline started: '{query}' audience={audience_override} depth={depth_override}")
+
+        status_placeholder.markdown(render_pipeline_status(set(), active="plan"), unsafe_allow_html=True)
+
+        try:
+            initial_state: GraphState = {"query": query, "audience": audience_override, "depth": depth_override}
+            final_state: GraphState   = initial_state.copy()
+            done_keys: set            = set()
+
+            for chunk in pipeline.stream(initial_state, stream_mode="values"):
+                final_state = chunk
+                done_keys   = {k for k in ("plan","document","draft","fact_check","report") if chunk.get(k) is not None}
+                all_stages  = ["plan","document","draft","fact_check","report"]
+                active      = next((s for s in all_stages if s not in done_keys), None)
+                status_placeholder.markdown(render_pipeline_status(done_keys, active), unsafe_allow_html=True)
+                logger.info(f"Pipeline: done={done_keys} active={active}")
+
+        except Exception as exc:
+            logger.exception("Pipeline invocation failed.")
+            st.error(friendly_error(exc, "The research pipeline failed."))
+            st.stop()
+
+        if final_state.get("error"):
+            st.error(friendly_error(final_state["error"], "The research pipeline stopped."))
+            st.stop()
+
+        if not final_state.get("report"):
+            st.error("Pipeline completed but no report was produced.")
+            st.stop()
+
+        logger.info("Pipeline completed successfully.")
+        st.session_state["result"] = final_state
+
+    # Rendered from session state so the report survives reruns
+    # (download clicks, widget changes, reconnects after a long run).
+    if st.session_state.get("result"):
+        final_state = st.session_state["result"]
+        report   = final_state["report"]
+        document = final_state["document"]
+        plan     = final_state["plan"]
+
+        sources_total = sum(len(s.sources) for s in document.sections)
+
+        status_placeholder.markdown(
+            render_pipeline_status({"plan","document","draft","fact_check","report"}),
+            unsafe_allow_html=True,
+        )
+
+        st.markdown(
+            f"""<div class="complete-strip">
+                <span class="cs-label">Research Complete</span>
+                <span class="cs-meta">{sources_total} sources &nbsp;·&nbsp; {len(document.sections)} sections &nbsp;·&nbsp; {plan.depth or "—"} depth</span>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
+        st.markdown('<hr class="if-rule">', unsafe_allow_html=True)
+
+        # ── Report header ──────────────────────────────────────────────────────
+
+        confidence_val = report.fact_check.overall_confidence if report.fact_check else "—"
+
+        st.markdown('<div class="report-eyebrow">Research Report</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="report-title">{report.title}</div>', unsafe_allow_html=True)
+        st.markdown(
+            f"""<div class="report-meta-strip">
+                <div class="rms-item"><span class="rms-label">Audience</span><span class="rms-value">{plan.audience or "—"}</span></div>
+                <div class="rms-item"><span class="rms-label">Depth</span><span class="rms-value">{plan.depth or "—"}</span></div>
+                <div class="rms-item"><span class="rms-label">Sections</span><span class="rms-value">{len(document.sections)}</span></div>
+                <div class="rms-item"><span class="rms-label">Sources</span><span class="rms-value">{sources_total}</span></div>
+                <div class="rms-item"><span class="rms-label">Confidence</span><span class="rms-value">{confidence_val}</span></div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
+        # ── PDF download only ──────────────────────────────────────────────────
+
+        st.markdown('<div class="export-label">Export Report</div>', unsafe_allow_html=True)
+        st.markdown('<div class="export-sub">Download the completed research report.</div>', unsafe_allow_html=True)
+
+        try:
+            pdf_exporter = PDFExporter()
+            pdf_bytes    = pdf_exporter.export(report, document)
+            st.download_button(
+                label="Download PDF",
+                data=pdf_bytes,
+                file_name=f"insightforge_{plan.topic[:40].replace(' ', '_')}.pdf",
+                mime="application/pdf",
+            )
+        except ImportError:
+            st.caption("PDF export requires reportlab — run: pip install reportlab")
+
+        st.markdown('<hr class="if-rule">', unsafe_allow_html=True)
+
+        # ── Executive summary ──────────────────────────────────────────────────
+
+        st.markdown(
+            f"""<div class="exec-summary-block">
+                <div class="if-eyebrow">Executive Summary</div>
+                <div class="exec-summary-body">{report.executive_summary}</div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
+        # ── Report sections ────────────────────────────────────────────────────
+
+        import html
+        import re
+
+        for idx, raw in enumerate(re.split(r'\n---\n', report.markdown), start=1):
+            raw = raw.strip()
+            if not raw:
+                continue
+            m = re.match(r'^##\s+(.+)', raw)
+            section_title = m.group(1).strip() if m else f"Section {idx}"
+            body          = raw[m.end():].strip() if m else raw
+            paragraphs    = [p.strip() for p in body.split("\n\n") if p.strip()]
+            body_html     = "".join(f"<p>{p}</p>" for p in paragraphs)
+
+            # Per-section confidence badge (hidden when no claims were matched)
+            conf_badge_html = ""
+            sc = (report.section_confidences or {}).get(section_title)
+            if sc and sc.total > 0:
+                sc_css = {"High":"confidence-high","Medium":"confidence-medium","Low":"confidence-low"}.get(sc.confidence_label,"confidence-medium")
+                conf_badge_html = (
+                    f'<span class="confidence-badge {sc_css}" style="font-size:0.55rem;">'
+                    f'{sc.confidence_pct:.0f}% verified</span>'
+                )
+
+            # Student Guide Mode block
+            guidance_html = ""
+            sg = (report.student_guidance or {}).get(section_title)
+            if sg:
+                def _guide_row(label: str, items: list[str]) -> str:
+                    return (
+                        '<div style="margin-bottom:0.6rem;">'
+                        f'<span class="rms-label">{label}</span>'
+                        f'<div style="color:#9a9ac8;font-size:0.82rem;line-height:1.6;">{" &nbsp;·&nbsp; ".join(html.escape(i) for i in items)}</div>'
+                        '</div>'
+                    )
+                guidance_html = (
+                    '<div style="background-color:#0d0d10;border:1px solid #2a2a3a;border-radius:3px;'
+                    'padding:1rem 1.2rem;margin:1.2rem 0 0 1.6rem;max-width:700px;">'
+                    '<div class="if-eyebrow" style="margin-bottom:0.8rem;">How to Research Further</div>'
+                    + _guide_row("Search terms", sg.search_terms)
+                    + _guide_row("Source types", sg.source_types)
+                    + _guide_row("Related subtopics", sg.related_subtopics)
+                    + '</div>'
+                )
+
+            # Built without blank/whitespace-only lines: Markdown ends an HTML
+            # block at a blank line and renders later indented lines as code.
+            st.markdown(
+                '<div class="section-block">'
+                '<div class="section-header">'
+                f'<span class="section-num">{idx:02d}</span>'
+                f'<span class="section-title">{section_title}</span>'
+                f'{conf_badge_html}'
+                '</div>'
+                f'<div class="section-body">{body_html}</div>'
+                f'{guidance_html}'
+                '</div>',
                 unsafe_allow_html=True,
             )
 
         st.markdown('<hr class="if-rule">', unsafe_allow_html=True)
 
-    # ── Sources ────────────────────────────────────────────────────────────
+        # ── Evidence review ────────────────────────────────────────────────────
 
-    st.markdown(f'<div class="if-eyebrow">Sources &nbsp;—&nbsp; {sources_total} retrieved</div>', unsafe_allow_html=True)
+        if report.fact_check:
+            st.markdown('<div class="if-eyebrow">Evidence Review</div>', unsafe_allow_html=True)
 
-    seen: set = set()
-    idx = 1
-    for section in document.sections:
-        for source in section.sources:
-            key = str(source.url)
-            if key in seen:
-                continue
-            seen.add(key)
-            try:
-                from urllib.parse import urlparse
-                domain = urlparse(key).netloc.lstrip("www.")
-            except Exception:
-                domain = key
-            score_html = f'<span class="source-score">{source.score:.2f}</span>' if source.score is not None else ""
+            conf     = report.fact_check.overall_confidence
+            conf_css = {"High":"confidence-high","Medium":"confidence-medium","Low":"confidence-low"}.get(conf,"confidence-medium")
+            results  = report.fact_check.results
+            n_sup    = sum(1 for r in results if r.verdict == "SUPPORTED")
+            n_unv    = sum(1 for r in results if r.verdict == "UNVERIFIABLE")
+            n_uns    = sum(1 for r in results if r.verdict == "UNSUPPORTED")
+
             st.markdown(
-                f"""<div class="source-item">
-                    <span class="source-num">{idx:02d}</span>
-                    <div class="source-body">
-                        <a class="source-title" href="{source.url}" target="_blank" rel="noopener noreferrer">{source.title}</a>
-                        <div class="source-domain">{domain}</div>
-                    </div>
-                    {score_html}
+                f"""<div class="evidence-header">
+                    <span class="confidence-badge {conf_css}">{conf} Confidence</span>
+                    <span class="verdict-tally">
+                        <span class="tally-supported">{n_sup} Supported</span> &nbsp;·&nbsp;
+                        <span class="tally-unverifiable">{n_unv} Unverifiable</span> &nbsp;·&nbsp;
+                        <span class="tally-unsupported">{n_uns} Unsupported</span>
+                    </span>
                 </div>""",
                 unsafe_allow_html=True,
             )
-            idx += 1
+
+            vdict = {"SUPPORTED":"vl-supported","UNVERIFIABLE":"vl-unverifiable","UNSUPPORTED":"vl-unsupported"}
+            for fc in results:
+                st.markdown(
+                    f"""<div class="claim-card">
+                        <div class="claim-verdict-row">
+                            <span class="verdict-label {vdict.get(fc.verdict,'vl-unverifiable')}">{fc.verdict}</span>
+                        </div>
+                        <div class="claim-text">{fc.claim}</div>
+                        <div class="claim-explanation">{fc.explanation}</div>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown('<hr class="if-rule">', unsafe_allow_html=True)
+
+        # ── Consistency check ──────────────────────────────────────────────────
+
+        if report.contradiction_report:
+            cr      = report.contradiction_report
+            cr_css  = {"High":"confidence-high","Medium":"confidence-medium","Low":"confidence-low"}.get(cr.consistency_score,"confidence-medium")
+
+            st.markdown('<div class="if-eyebrow">Consistency Check</div>', unsafe_allow_html=True)
+            st.markdown(
+                f"""<div class="evidence-header">
+                    <span class="confidence-badge {cr_css}">{cr.consistency_score} Consistency</span>
+                    <span class="verdict-tally">{len(cr.contradictions)} contradiction(s) found</span>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+
+            if not cr.contradictions:
+                st.markdown(
+                    '<div class="claim-card"><div class="tally-supported" style="font-size:0.85rem;">'
+                    'No contradictions detected across sections.</div></div>',
+                    unsafe_allow_html=True,
+                )
+            for c in cr.contradictions:
+                st.markdown(
+                    f"""<div class="claim-card">
+                        <div style="display:flex;gap:1.5rem;flex-wrap:wrap;">
+                            <div style="flex:1;min-width:240px;">
+                                <div class="rms-label">{html.escape(c.section_a)}</div>
+                                <div class="claim-text">{html.escape(c.claim_a)}</div>
+                            </div>
+                            <div style="flex:1;min-width:240px;">
+                                <div class="rms-label">{html.escape(c.section_b)}</div>
+                                <div class="claim-text">{html.escape(c.claim_b)}</div>
+                            </div>
+                        </div>
+                        <div class="claim-explanation">{html.escape(c.explanation)}</div>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown('<hr class="if-rule">', unsafe_allow_html=True)
+
+        # ── Sources ────────────────────────────────────────────────────────────
+
+        st.markdown(f'<div class="if-eyebrow">Sources &nbsp;—&nbsp; {sources_total} retrieved</div>', unsafe_allow_html=True)
+
+        if report.source_diversity:
+            sd     = report.source_diversity
+            sd_css = {"High":"confidence-high","Medium":"confidence-medium","Low":"confidence-low"}.get(sd.diversity_score,"confidence-medium")
+            st.markdown(
+                f"""<div class="evidence-header">
+                    <span class="confidence-badge {sd_css}">{sd.diversity_score} Diversity</span>
+                    <span class="verdict-tally">
+                        Academic: {sd.academic} &nbsp;·&nbsp; News: {sd.news} &nbsp;·&nbsp;
+                        Industry: {sd.industry} &nbsp;·&nbsp; Gov/Edu: {sd.government} &nbsp;·&nbsp;
+                        Other: {sd.other}
+                    </span>
+                    <span class="verdict-tally">Dominant: {sd.dominant_type}</span>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+
+        seen: set = set()
+        idx = 1
+        for section in document.sections:
+            for source in section.sources:
+                key = str(source.url)
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    from urllib.parse import urlparse
+                    domain = urlparse(key).netloc.lstrip("www.")
+                except Exception:
+                    domain = key
+                score_html = f'<span class="source-score">{source.score:.2f}</span>' if source.score is not None else ""
+                st.markdown(
+                    f"""<div class="source-item">
+                        <span class="source-num">{idx:02d}</span>
+                        <div class="source-body">
+                            <a class="source-title" href="{source.url}" target="_blank" rel="noopener noreferrer">{source.title}</a>
+                            <div class="source-domain">{domain}</div>
+                        </div>
+                        {score_html}
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+                idx += 1

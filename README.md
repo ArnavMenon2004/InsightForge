@@ -94,7 +94,7 @@ InsightForge/
 │   └── export.py           # PDFExporter
 ├── config/
 │   ├── settings.py         # Environment variables + token budget constants
-│   └── llm.py              # Multi-provider LLM initialisation (Gemini + Groq)
+│   └── llm.py              # Gemini LLM initialisation
 ├── utils/
 │   └── logger.py           # Rotating file + console logger
 ├── tests/
@@ -122,12 +122,11 @@ Each layer knows only about the layer to its left. The UI never touches a provid
 
 ### Multi-provider LLM routing
 
-InsightForge routes LLM calls across two providers based on task requirements:
+InsightForge runs every LLM call on Google Gemini:
 
 | Provider | Model | Used for |
 |---|---|---|
 | Google Gemini | gemini-3.1-flash-lite | Planner, Researcher, Writer, FactChecker, Citation |
-| Groq | llama-3.3-70b-versatile | Available as fallback — swap in via `config/llm.py` |
 
 Gemini's free tier provides 250K TPM and 500 RPD — sufficient for ~38 full pipeline runs per day with no rate-limit errors.
 

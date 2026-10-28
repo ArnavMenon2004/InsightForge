@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from pydantic import BaseModel, Field
 
 from agents.base_agent import BaseAgent
 from config.llm import GEMINI_MODEL
 from config.settings import SECTION_RATE_LIMIT_DELAY
-from prompts.writer import REPORT_METADATA_PROMPT, SECTION_WRITER_PROMPT
+from prompts.writer import (
+    REPORT_METADATA_PROMPT,
+    SECTION_WRITER_PROMPT,
+    STUDENT_GUIDE_PROMPT,
+)
 from schemas.report import FinalReport
-from schemas.research import ResearchDocument, ResearchSection
+from schemas.research import ResearchDocument, ResearchSection, StudentGuidance
 from schemas.result import AgentResult
 
 
@@ -113,10 +118,16 @@ class WriterAgent(BaseAgent):
 
         metadata = self._generate_metadata(document, markdown)
 
+        # Step 4 — Student Guide Mode: per-section research guidance.
+        student_guidance: dict[str, StudentGuidance] | None = None
+        if document.audience == "Student":
+            student_guidance = self._generate_student_guidance(document)
+
         report = FinalReport(
             title=metadata.title,
             executive_summary=metadata.executive_summary,
             markdown=markdown,
+            student_guidance=student_guidance,
         )
 
         elapsed = time.perf_counter() - start
@@ -185,6 +196,48 @@ class WriterAgent(BaseAgent):
                 "report_body": report_body,
             },
         )
+
+    def _generate_student_guidance(
+        self,
+        document: ResearchDocument,
+    ) -> dict[str, StudentGuidance]:
+        """
+        Produce a StudentGuidance block for every section.
+
+        Returns:
+            Map of section title -> StudentGuidance.
+        """
+        self.logger.info(f"{self.name}: Generating student guidance.")
+
+        def _one(position: int, section: ResearchSection) -> StudentGuidance | None:
+            # Staggered start keeps SECTION_RATE_LIMIT_DELAY spacing between
+            # call starts while the calls themselves overlap.
+            if SECTION_RATE_LIMIT_DELAY > 0:
+                time.sleep(SECTION_RATE_LIMIT_DELAY * (position + 1))
+            try:
+                return self._run_gemini_chain(
+                    schema=StudentGuidance,
+                    prompt=STUDENT_GUIDE_PROMPT,
+                    inputs={
+                        "section_title": section.title,
+                        "section_summary": section.summary,
+                    },
+                )
+            except Exception:
+                # Guidance is optional; don't lose the whole report over one section.
+                self.logger.exception(
+                    f"{self.name}: Student guidance failed for '{section.title}'; skipping."
+                )
+                return None
+
+        with ThreadPoolExecutor(max_workers=len(document.sections) or 1) as pool:
+            results = list(pool.map(_one, range(len(document.sections)), document.sections))
+
+        return {
+            section.title: g
+            for section, g in zip(document.sections, results)
+            if g is not None
+        }
 
     @staticmethod
     def _assemble_markdown(section_bodies: list[tuple[str, str]]) -> str:
