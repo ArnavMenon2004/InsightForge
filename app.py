@@ -430,10 +430,18 @@ with tab1:
     query = st.text_input("query", placeholder="e.g. The future of quantum computing in drug discovery", label_visibility="collapsed")
 
     col_audience, col_depth, col_empty = st.columns([1, 1, 1.5])
+    def choice_box(label, options):
+        # filter_mode=None turns off typing so it behaves as a pure dropdown;
+        # older Streamlit versions lack the argument, so fall back to the default.
+        try:
+            return st.selectbox(label, options=options, index=0, filter_mode=None)
+        except TypeError:
+            return st.selectbox(label, options=options, index=0)
+
     with col_audience:
-        audience = st.selectbox("AUDIENCE", options=["Auto","Beginner","Student","Developer","Executive"], index=0)
+        audience = choice_box("AUDIENCE", ["Auto","Beginner","Student","Developer","Executive"])
     with col_depth:
-        depth = st.selectbox("DEPTH", options=["Auto","Basic","Intermediate","Advanced"], index=0)
+        depth = choice_box("DEPTH", ["Auto","Basic","Intermediate","Advanced"])
 
     audience_override = None if audience == "Auto" else audience
     depth_override    = None if depth == "Auto" else depth

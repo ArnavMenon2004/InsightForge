@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from config.settings import MIN_SOURCE_SCORE
+from urllib.parse import urlparse
+
+from config.settings import LOW_QUALITY_DOMAINS, MIN_SOURCE_SCORE
 from providers.tavily_provider import TavilyProvider
 from schemas.source import Source, SourceType
 from tools.base_tool import BaseTool
@@ -45,9 +47,10 @@ class WebSearchTool(BaseTool):
         """
         logger.debug(f"WebSearchTool: searching → '{query}'")
 
+        # Ask for extra results: some are dropped by the filters below.
         response = self._provider.search(
             query=query,
-            max_results=max_results,
+            max_results=min(max_results * 2, 20),
         )
 
         sources: list[Source] = []
@@ -56,6 +59,11 @@ class WebSearchTool(BaseTool):
         for raw in response.get("results", []):
             source = self._parse_result(raw)
             if source is None:
+                continue
+
+            if self._is_low_quality_domain(str(source.url)):
+                logger.debug(f"WebSearchTool: Discarding low-quality domain ({source.url}).")
+                discarded += 1
                 continue
 
             # Quality filter — discard low-relevance results.
@@ -69,6 +77,8 @@ class WebSearchTool(BaseTool):
 
             sources.append(source)
 
+        sources = sources[:max_results]
+
         logger.debug(
             f"WebSearchTool: '{query}' → {len(sources)} sources kept, "
             f"{discarded} discarded (score < {MIN_SOURCE_SCORE})."
@@ -79,6 +89,11 @@ class WebSearchTool(BaseTool):
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_low_quality_domain(url: str) -> bool:
+        host = (urlparse(url).hostname or "").lower()
+        return any(host == d or host.endswith("." + d) for d in LOW_QUALITY_DOMAINS)
 
     @staticmethod
     def _parse_result(raw: dict) -> Source | None:

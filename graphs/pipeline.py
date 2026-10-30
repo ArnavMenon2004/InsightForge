@@ -42,6 +42,8 @@ conditional edge so the UI always receives a usable state object.
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 from langgraph.graph import END, START, StateGraph
 
 from agents.citation import CitationAgent
@@ -143,18 +145,46 @@ def contradict_node(state: GraphState) -> dict:
         return {}
 
 
+_ACADEMIC = (
+    "arxiv.org", "ieee.org", "acm.org", "nature.com", "science.org", "sciencedirect.com",
+    "springer.com", "springeropen.com", "wiley.com", "tandfonline.com", "sagepub.com",
+    "aps.org", "aip.org", "iop.org", "frontiersin.org", "mdpi.com", "plos.org", "cell.com",
+    "preprints.org", "biorxiv.org", "medrxiv.org", "ssrn.com", "openreview.net", "doi.org",
+    "ncbi.nlm.nih.gov", "pubmed.ncbi.nlm.nih.gov", "researchgate.net", "semanticscholar.org", "jstor.org",
+)
+_NEWS = (
+    "reuters.com", "bbc.com", "bbc.co.uk", "cnn.com", "nytimes.com", "theguardian.com",
+    "forbes.com", "bloomberg.com", "wsj.com", "ft.com", "economist.com", "cnbc.com",
+    "techcrunch.com", "wired.com", "theverge.com", "arstechnica.com", "zdnet.com",
+    "venturebeat.com", "technologyreview.com", "quantamagazine.org", "newscientist.com",
+    "phys.org", "sciencedaily.com", "sciencemediacentre.org", "prnewswire.com",
+    "businesswire.com", "globenewswire.com", "quantumcomputingreport.com", "thequantuminsider.com",
+)
+_INDUSTRY_HOSTS = (
+    "ibm.com", "microsoft.com", "aws.amazon.com", "google.com", "nvidia.com",
+    "quantinuum.com", "ionq.com", "quera.com", "rigetti.com", "dwavesys.com",
+)
+_INDUSTRY_PATHS = ("/blog", "/insights", "/press", "/whitepaper", "/resources")
+
+
 def _classify_source(url: str) -> str:
-    """Rule-based source-type classifier (no LLM)."""
-    u = url.lower()
-    if any(k in u for k in ["arxiv", "ieee", "acm.org", "pubmed", "sciencedirect",
-                            "springer", "researchgate", "semanticscholar", "nature.com", "jstor"]):
+    """Rule-based source-type classifier (no LLM), matched on the URL's host."""
+    parsed = urlparse(url.lower())
+    host = parsed.hostname or ""
+
+    def on(domains) -> bool:
+        return any(host == d or host.endswith("." + d) for d in domains)
+
+    if on(_ACADEMIC):
         return "academic"
-    if any(k in u for k in ["bbc.", "reuters", "techcrunch", "wired.", "nytimes", "cnn.",
-                            "theguardian", "forbes", "bloomberg", "venturebeat"]):
+    if on(_NEWS):
         return "news"
-    if any(k in u for k in [".gov", ".edu", "wikipedia.org", "who.int", "un.org"]):
+    if (
+        host.endswith((".gov", ".edu", ".mil", ".gov.uk", ".ac.uk", ".gc.ca"))
+        or on(("who.int", "un.org", "europa.eu", "oecd.org", "worldbank.org"))
+    ):
         return "government"
-    if any(k in u for k in ["medium.com", "dev.to", "towardsdatascience", "substack", "/blog"]):
+    if on(_INDUSTRY_HOSTS) or any(p in parsed.path for p in _INDUSTRY_PATHS) or "/blog" in host:
         return "industry"
     return "other"
 

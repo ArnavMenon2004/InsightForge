@@ -44,11 +44,13 @@ class FactCheckerAgent(BaseAgent):
             sources_text=sources_text,
         )
 
+        fact_check = self._with_overall_confidence(result.data)
+
         enriched = draft.model_copy(
             update={
-                "fact_check": result.data,
+                "fact_check": fact_check,
                 "section_confidences": self._compute_section_confidences(
-                    draft.markdown, result.data
+                    draft.markdown, fact_check
                 ),
             }
         )
@@ -59,6 +61,19 @@ class FactCheckerAgent(BaseAgent):
             model=result.model,
             execution_time=result.execution_time,
         )
+
+    @staticmethod
+    def _with_overall_confidence(fact_check: FactCheckReport) -> FactCheckReport:
+        """
+        Set overall_confidence from the verdicts (High >=80% SUPPORTED,
+        Medium >=50%, else Low), the rule the prompt states.  The model
+        sometimes miscounts, so the label is derived here instead.
+        """
+        if not fact_check.results:
+            return fact_check
+        share = sum(r.verdict == "SUPPORTED" for r in fact_check.results) / len(fact_check.results)
+        label = "High" if share >= 0.8 else "Medium" if share >= 0.5 else "Low"
+        return fact_check.model_copy(update={"overall_confidence": label})
 
     @staticmethod
     def _compute_section_confidences(

@@ -35,8 +35,23 @@ SNIPPET_CHAR_LIMIT: int = 1000  # chars of fetched page content per source
 # --- Source quality filter ---
 MIN_SOURCE_SCORE: float = 0.5
 
+# Domains dropped from search results: social posts, forums, blogs and press-release
+# wires are weak evidence for a research report. Edit freely.
+LOW_QUALITY_DOMAINS: tuple[str, ...] = (
+    "facebook.com", "instagram.com", "tiktok.com", "x.com", "twitter.com",
+    "reddit.com", "quora.com", "medium.com", "youtube.com", "youtu.be",
+    "pinterest.com", "linkedin.com", "finance.yahoo.com", "wikipedia.org",
+    "cryptorank.io", "cointelegraph.com", "coindesk.com", "decrypt.co", "bitcoinist.com",
+    "newsbtc.com", "stocktitan.net", "benzinga.com", "seekingalpha.com", "investing.com",
+    "marketbeat.com", "tipranks.com", "zacks.com", "fool.com",
+)
+
 # --- FactChecker / CitationAgent budget ---
-FC_MAX_SOURCES: int = 15
-FC_SNIPPET_CHARS: int = 400
+# Must cover every source the researcher collects, otherwise claims backed by
+# later sources are wrongly marked UNVERIFIABLE (a run can gather 50+).
+FC_MAX_SOURCES: int = 80
+# Same as SNIPPET_CHAR_LIMIT: the checker must see what the writer saw, or it
+# marks claims from later in a page as UNVERIFIABLE.
+FC_SNIPPET_CHARS: int = SNIPPET_CHAR_LIMIT
 # Paper to PPT: max characters of paper text sent to the LLM (~10k tokens)
 PPT_PAPER_CHAR_LIMIT: int = 40000
